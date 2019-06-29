@@ -1,0 +1,3 @@
+[submodule "SilentPatchMGR/Utils"]
+	path = SilentPatchMGR/Utils
+	url = https://github.com/CookiePLMonster/ModUtils.git

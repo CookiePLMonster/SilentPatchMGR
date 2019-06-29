@@ -125,9 +125,19 @@ namespace FSFix
 		internal::GetFinalPath( utfBuffer, bufferSize );
 	}
 
+	void sprintf_GetFormatArgument( char* utfBuffer, size_t bufferSize, const char* /*format*/, const char* /*arg1*/, const char* fileName )
+	{
+		internal::GetFinalPath( utfBuffer, bufferSize, fileName );	
+	}
+
 	void sprintf_AppendGraphicsOption( char* utfBuffer, size_t /*bufferSize*/ )
 	{
 		PathAppendA( utfBuffer, "GraphicOption" );
+	}
+
+	void sprintf_AppendFormatArgument( char* utfBuffer, size_t /*bufferSize*/, const char* /*format*/, const char* /*arg1*/, const char* fileName )
+	{
+		PathAppendA( utfBuffer, fileName );
 	}
 }
 
@@ -188,8 +198,62 @@ static void InitASI()
 			Patch( writeGraphicsOptions.get<void>( 0x8C + 2 ), &pCloseHandleChecked );
 		}
 
+		
+		// WriteSaveDataUnused (seems unused but maybe it's not, so patching it just in case):
+		{
+			auto writeSaveDataUnused = pattern( "83 C4 24 68 ? ? ? ? B9" ).get_one();
+
+			// sprintf_s replaced with a function to obtain path to MGR.sav file
+			InjectHook( writeSaveDataUnused.get<void>( -5 ), sprintf_GetFormatArgument );
+
+			Patch( writeSaveDataUnused.get<void>( 0xC9 + 2 ), &pCreateFileUTF8 );
+
+			// Don't close invalid handles
+			Patch( writeSaveDataUnused.get<void>( 0x175 + 2 ), &pCloseHandleChecked );
+		}
 
 
+		// ReadSaveData:
+		{
+			auto readSaveData = pattern( "8B F0 83 FE FF 75 1E" ).get_one();
+
+			// sprintf_s replaced with a function to obtain path to MGR.sav (from argument)
+			InjectHook( readSaveData.get<void>( -0x25 ), sprintf_GetFormatArgument );
+
+			Patch( readSaveData.get<void>( -6 + 2 ), &pCreateFileUTF8 );
+		}
+
+		
+		// DataSave:
+		{
+			auto dataSave = pattern( "68 00 01 00 00 50 E8 ? ? ? ? 8D 4C 24 40" ).get_one();
+
+			// sprintf_s replaced with a function to obtain path to SaveData
+			InjectHook( dataSave.get<void>( 6 ), sprintf_GetSaveData );
+
+			// sprintf_s replaced with a function to append MGR.sav (from argument)
+			InjectHook( dataSave.get<void>( 0x47 ), sprintf_AppendFormatArgument );
+
+			Patch( dataSave.get<void>( 0x4C + 2 ), &pCreateFileUTF8 );
+			Patch( dataSave.get<void>( 0x1BA + 2 ), &pCreateFileUTF8 );
+
+			Patch( dataSave.get<void>( 0x19A + 2 ), &pCloseHandleChecked );
+			Patch( dataSave.get<void>( 0x264 + 2 ), &pCloseHandleChecked );
+		}
+
+
+		// SaveDataDelete:
+		{
+			auto saveDataDelete = pattern( "8B F0 83 FE FF 75 19" ).get_one();
+
+			// sprintf_s replaced with a function to obtain path to MGR.sav (from argument)
+			InjectHook( saveDataDelete.get<void>( -0x25 ), sprintf_GetFormatArgument );
+
+			Patch( saveDataDelete.get<void>( -6 + 2 ), &pCreateFileUTF8 );
+			Patch( saveDataDelete.get<void>( 0xCB + 2 ), &pCreateFileUTF8 );
+
+			Patch( saveDataDelete.get<void>( 0x18C + 2 ), &pCloseHandleChecked );
+		}
 	}
 }
 

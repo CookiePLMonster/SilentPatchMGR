@@ -148,37 +148,48 @@ static void InitASI()
 		using namespace FSFix;
 
 		// CreateDirectoryRecursively replaced with a UTF-8 friendly version
-		void* createDirRecursive = get_pattern( "56 8B B4 24 10 02 00 00 56", -6 );
-		InjectHook( createDirRecursive, CreateDirectoryRecursivelyUTF8, PATCH_JUMP );
+		{
+			void* createDirRecursive = get_pattern( "56 8B B4 24 10 02 00 00 56", -6 );
+			InjectHook( createDirRecursive, CreateDirectoryRecursivelyUTF8, PATCH_JUMP );
+		}
 
 
 		// getenv_s NOP'd
-		void* getEnvFunc = get_pattern( "59 33 DB 89 5D FC", -0x13 );
-		Patch<uint8_t>( getEnvFunc, 0xC3 ); // retn
+		{
+			void* getEnvFunc = get_pattern( "59 33 DB 89 5D FC", -0x13 );
+			Patch<uint8_t>( getEnvFunc, 0xC3 ); // retn
+		}
 
 		
 		// ReadGraphicsOptions:
-		auto readGraphicsOptions = pattern( "83 C4 20 6A 00 68 80 00 00 00 6A 03" ).get_one();	
+		{
+			auto readGraphicsOptions = pattern( "83 C4 20 6A 00 68 80 00 00 00 6A 03" ).get_one();	
 
-		// sprintf_s replaced with a function to obtain path to GraphicOption file
-		InjectHook( readGraphicsOptions.get<void>( -5 ), sprintf_GetGraphicsOption );
+			// sprintf_s replaced with a function to obtain path to GraphicOption file
+			InjectHook( readGraphicsOptions.get<void>( -5 ), sprintf_GetGraphicsOption );
 
-		Patch( readGraphicsOptions.get<void>( 0x1E + 2 ), &pCreateFileUTF8 );
+			Patch( readGraphicsOptions.get<void>( 0x1E + 2 ), &pCreateFileUTF8 );
+		}
 
-		
+
 		// WriteGraphicsOptions:
-		auto writeGraphicsOptions = pattern( "68 00 01 00 00 50 E8 ? ? ? ? 8D 4C 24 28 51 E8" ).get_one();
+		{
+			auto writeGraphicsOptions = pattern( "68 00 01 00 00 50 E8 ? ? ? ? 8D 4C 24 28 51 E8" ).get_one();
 
-		// sprintf_s replaced with a function to obtain path to SaveData
-		InjectHook( writeGraphicsOptions.get<void>( 6 ), sprintf_GetSaveData );
+			// sprintf_s replaced with a function to obtain path to SaveData
+			InjectHook( writeGraphicsOptions.get<void>( 6 ), sprintf_GetSaveData );
 
-		// sprintf_s replaced with a function to append GraphicOption
-		InjectHook( writeGraphicsOptions.get<void>( 0x43 ), sprintf_AppendGraphicsOption );
+			// sprintf_s replaced with a function to append GraphicOption
+			InjectHook( writeGraphicsOptions.get<void>( 0x43 ), sprintf_AppendGraphicsOption );
 
-		Patch( writeGraphicsOptions.get<void>( 0x62 + 2 ), &pCreateFileUTF8 );
+			Patch( writeGraphicsOptions.get<void>( 0x62 + 2 ), &pCreateFileUTF8 );
 
-		// Don't close invalid handles
-		Patch( writeGraphicsOptions.get<void>( 0x8C + 2), &pCloseHandleChecked );
+			// Don't close invalid handles
+			Patch( writeGraphicsOptions.get<void>( 0x8C + 2 ), &pCloseHandleChecked );
+		}
+
+
+
 	}
 }
 

@@ -7,16 +7,28 @@
 
 #include <shlwapi.h>
 #include <ShlObj.h>
+#include <shellapi.h>
 #include <array>
+
+#include <Commctrl.h>
 
 #pragma comment(lib, "Shlwapi.lib")
 
-#define DEBUG_DOCUMENTS_PATH	0
+#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#pragma comment(lib, "Comctl32.lib")
+
+#define DEBUG_DOCUMENTS_PATH	1
 
 namespace FSFix
 {
 	namespace internal
 	{
+		bool DirectoryExists( LPCWSTR lpPath )
+		{
+			const DWORD attribs = GetFileAttributesW( lpPath );
+			return attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+		}
+
 		const wchar_t* GetSaveDataPath()
 		{
 			static const std::array<wchar_t, MAX_PATH> path = [] {
@@ -33,12 +45,148 @@ namespace FSFix
 #endif
 				if ( SUCCEEDED(hr) )
 				{
-					PathCombineW( result.data(), documentsPath, L"MGR\\SaveData" );
+					PathCombineW( result.data(), documentsPath, L"MGR" );
 
-					// TODO: Ask the user if they want to move files right here, and decide what path to return depending on their choice
+					// TODO: Read the INI
+					std::array<wchar_t, MAX_PATH> originalPath {};
+					if ( GetEnvironmentVariableW( L"USERPROFILE", originalPath.data(), originalPath.size() ) != 0 )
+					{
+						PathAppendW( originalPath.data(), L"Documents" );
+						const size_t documentsDirPathLen = wcslen( originalPath.data() ); // We'll restore the null terminator later for deleting directories
+
+						bool skipMoveQuestion = true;
+						PathAppendW( originalPath.data(), L"MGR" );
+						if ( HANDLE sourceDirectory = CreateFileW( originalPath.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); sourceDirectory != INVALID_HANDLE_VALUE )
+						{
+							// Source exists so we have something to move
+							skipMoveQuestion = false;
+							if ( HANDLE destinationDirectory = CreateFileW( result.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); destinationDirectory != INVALID_HANDLE_VALUE )
+							{	
+								FILE_ID_INFO srcIdInfo, destIdInfo;
+								if ( GetFileInformationByHandleEx( sourceDirectory, FileIdInfo, &srcIdInfo, sizeof(srcIdInfo) ) != FALSE &&
+									GetFileInformationByHandleEx( destinationDirectory, FileIdInfo, &destIdInfo, sizeof(destIdInfo) ) != FALSE )
+								{
+									skipMoveQuestion = srcIdInfo.VolumeSerialNumber == destIdInfo.VolumeSerialNumber &&
+														memcmp( &srcIdInfo.FileId, &destIdInfo.FileId, sizeof(srcIdInfo.FileId) ) == 0;
+								}
+								else
+								{
+									// Windows 7 fallback
+									BY_HANDLE_FILE_INFORMATION srcInfo, destInfo;
+									if ( GetFileInformationByHandle( sourceDirectory, &srcInfo) != FALSE && GetFileInformationByHandle( destinationDirectory, &destInfo) != FALSE )
+									{
+										skipMoveQuestion = srcInfo.dwVolumeSerialNumber == destInfo.dwVolumeSerialNumber &&
+															srcInfo.nFileIndexLow == destInfo.nFileIndexLow && srcInfo.nFileIndexHigh == destInfo.nFileIndexHigh;
+									}
+								}
+								CloseHandle( destinationDirectory );
+							}
+
+							CloseHandle( sourceDirectory );
+						}
+
+
+						if ( !skipMoveQuestion )
+						{
+							auto fnDialogFunc = [] ( HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR ) -> HRESULT
+							{
+								if ( msg == TDN_CREATED )
+								{
+									HMODULE gameModule = GetModuleHandle( nullptr );
+									if ( HICON mainIcon = LoadIcon( gameModule, TEXT("MAINICON") ); mainIcon != nullptr )
+									{
+										SendMessage( hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(mainIcon) );
+									}
+									if ( HICON smallIcon = LoadIcon( gameModule, TEXT("SMALLICON") ); smallIcon != nullptr )
+									{
+										SendMessage( hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon) );
+									}
+								}
+
+								return S_OK;
+							};
+
+							std::wstring contentString;
+							contentString.append( L"SilentPatch found your save games in the following location:\n\n" );
+							contentString.append( originalPath.data() );
+							contentString.append( L"\n\nThis does not appear to be your real Documents directory. "
+													L"Do you wish to relocate them to this location instead?\n\n" );
+							contentString.append( result.data() );
+							contentString.append( L"\n\nThis way saves will be located in your real Documents directory and "
+													L"Steam Cloud will start to function properly.\n\n"
+													L"If you select \"Don't ask me again\" your choice will be remembered in SilentPatchMGR.ini file." );
+
+							// TODO: Prompt the user
+							TASKDIALOGCONFIG dialogConfig { sizeof(dialogConfig) };
+							dialogConfig.dwFlags = TDF_CAN_BE_MINIMIZED;
+							dialogConfig.dwCommonButtons = TDCBF_YES_BUTTON|TDCBF_NO_BUTTON;
+							dialogConfig.pszWindowTitle = L"SilentPatch";
+							dialogConfig.pszContent = contentString.c_str();
+							dialogConfig.nDefaultButton = IDYES;
+							dialogConfig.pszVerificationText = L"Don't ask me again";
+							dialogConfig.pszMainIcon = TD_INFORMATION_ICON;
+							dialogConfig.pfCallback = fnDialogFunc;
+
+							int buttonResult;
+							BOOL dontAskAgain;
+							if ( SUCCEEDED(TaskDialogIndirect( &dialogConfig, &buttonResult, nullptr, &dontAskAgain )) )
+							{
+								// TODO: Store result in INI if dontAskAgain is checked
+								if ( buttonResult == IDYES )
+								{
+									// Copying just to be sure it's double null terminated at the end
+									auto stringToDoubleNullTerminated = []( const auto& str )
+									{
+										std::vector<wchar_t> result( str.begin(), str.begin() + wcslen(str.data()) );
+										result.insert( result.end(), 2, '\0' );
+										return result;
+									};
+
+									const std::vector<wchar_t> source = stringToDoubleNullTerminated( originalPath );
+									const std::vector<wchar_t> destination = stringToDoubleNullTerminated( result );
+
+									SHFILEOPSTRUCTW moveOp = {};
+									moveOp.wFunc = FO_MOVE;
+									moveOp.fFlags = FOF_NOCONFIRMMKDIR;
+									moveOp.pFrom = source.data();
+									moveOp.pTo = destination.data();
+									const int moveResult = SHFileOperationW( &moveOp );
+									if ( moveResult == 0 )
+									{
+										if ( moveOp.fAnyOperationsAborted != FALSE )
+										{
+											MessageBoxW( nullptr, L"Move operation has been aborted by the user. The game will continue using an original save path.\n\n"
+																  L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
+																  L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
+										}
+									}
+									else
+									{
+										MessageBoxW( nullptr, L"Move operation failed. The game will continue using an original save path.\n\n"
+											L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
+										
+											L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
+									}
+								}
+								else
+								{
+									// User pressed No, fall back to using an old path
+									// TODO: Do
+								}
+							}
+							else
+							{
+								// Something went wrong displaying the dialog, fall back to using an old path
+								// TODO: DO
+							}
+						}
+						originalPath[documentsDirPathLen] = '\0';
+						RemoveDirectoryW( originalPath.data() );
+					}
 
 					CoTaskMemFree( documentsPath );
 				}
+				PathAppendW( result.data(), L"SaveData" );
 				return result;
 			} ();
 
@@ -47,7 +195,7 @@ namespace FSFix
 
 		BOOL CreateDirectoryRecursively( LPCWSTR dirName )
 		{
-			if ( DWORD attribs = GetFileAttributesW( dirName ); attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY) != 0 )
+			if ( DirectoryExists( dirName ) )
 			{
 				return TRUE;
 			}

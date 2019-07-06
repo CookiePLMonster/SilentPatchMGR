@@ -9,6 +9,8 @@
 #include <ShlObj.h>
 #include <shellapi.h>
 #include <array>
+#include <optional>
+#include <string>
 
 #include <Commctrl.h>
 
@@ -18,6 +20,8 @@
 #pragma comment(lib, "Comctl32.lib")
 
 #define DEBUG_DOCUMENTS_PATH	1
+
+HMODULE hDLLModule;
 
 namespace FSFix
 {
@@ -29,164 +33,240 @@ namespace FSFix
 			return attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY) != 0;
 		}
 
+		std::wstring& TrimZeros( std::wstring& str )
+		{
+			auto pos = str.find_last_not_of( L'\0' );
+			if ( pos == std::string::npos )
+			{
+				str.clear();
+			}
+			else
+			{
+				str.erase( pos + 1 );
+			}
+			return str;
+		}
+
+		std::wstring GetUserProfilePath( size_t& documentsPathLength )
+		{
+			std::wstring result(MAX_PATH, '\0');
+			if ( GetEnvironmentVariableW( L"USERPROFILE", result.data(), result.size() ) != 0 )
+			{
+				PathAppendW( result.data(), L"Documents" );
+				documentsPathLength = wcslen( result.c_str() ); // We'll restore the null terminator later for deleting directories
+				PathAppendW( result.data(), L"MGR" );
+			}
+			return TrimZeros( result );
+		}
+
+		std::wstring GetFixedDocumentsPath()
+		{
+			std::wstring result(MAX_PATH, '\0');
+			PWSTR documentsPath;
+#if DEBUG_DOCUMENTS_PATH
+			HRESULT hr = S_OK;
+			constexpr wchar_t debugPath[] = L"H:\\ŻąłóРстуぬねのはen";
+			documentsPath = static_cast<PWSTR>(CoTaskMemAlloc( sizeof(debugPath) ));
+			memcpy( documentsPath, debugPath, sizeof(debugPath) );
+#else
+			HRESULT hr = SHGetKnownFolderPath( FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documentsPath );
+#endif
+			if ( SUCCEEDED(hr) )
+			{
+				PathCombineW( result.data(), documentsPath, L"MGR" );
+				CoTaskMemFree( documentsPath );
+			}
+			return TrimZeros( result );
+		}
+
+		std::wstring GetINIPath()
+		{
+			std::wstring result(MAX_PATH, '\0');
+			GetModuleFileNameW( hDLLModule, result.data(), result.size() - 3 ); // Minus max required space for extension
+			PathRenameExtensionW( result.data(), L".ini" );
+			return TrimZeros( result );
+		}
+
+		constexpr const wchar_t* OPT_RELOCATE_SAVE_DIR = L"RelocateSaveDirectory";
+		std::optional<bool> ReadSaveRelocOption( const std::wstring& iniPath )
+		{
+			std::optional<bool> result;
+
+			int iniOption = GetPrivateProfileIntW( L"SilentPatch", OPT_RELOCATE_SAVE_DIR, -1, iniPath.c_str() );
+			if ( iniOption != -1 )
+			{
+				result = iniOption != 0;
+			}
+
+			return result;
+		}
+
+		void WriteSaveRelocOption( const std::wstring& iniPath, bool reloc )
+		{
+			WritePrivateProfileStringW( L"SilentPatch", OPT_RELOCATE_SAVE_DIR, std::to_wstring(reloc).c_str(), iniPath.c_str() );
+		}
+
 		const wchar_t* GetSaveDataPath()
 		{
 			static const std::array<wchar_t, MAX_PATH> path = [] {
-				std::array<wchar_t, MAX_PATH> result {};
+				size_t userProfileDirPos = 0;
+				const auto userProfilePath = GetUserProfilePath( userProfileDirPos );
+				const auto documentsPath = GetFixedDocumentsPath();
 
-				PWSTR documentsPath;
-#if DEBUG_DOCUMENTS_PATH
-				HRESULT hr = S_OK;
-				constexpr wchar_t debugPath[] = L"H:\\ŻąłóРстуぬねのはen";
-				documentsPath = static_cast<PWSTR>(CoTaskMemAlloc( sizeof(debugPath) ));
-				memcpy( documentsPath, debugPath, sizeof(debugPath) );
-#else
-				HRESULT hr = SHGetKnownFolderPath( FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documentsPath );
-#endif
-				if ( SUCCEEDED(hr) )
+				const auto iniPath = GetINIPath();
+
+				bool useDocumentsPath = false;
+				
+				auto relocIniOption = ReadSaveRelocOption( iniPath );
+				if ( relocIniOption )
 				{
-					PathCombineW( result.data(), documentsPath, L"MGR" );
-
-					// TODO: Read the INI
-					std::array<wchar_t, MAX_PATH> originalPath {};
-					if ( GetEnvironmentVariableW( L"USERPROFILE", originalPath.data(), originalPath.size() ) != 0 )
+					// Use option from INI and skip any relocation
+					useDocumentsPath = *relocIniOption;
+				}
+				else
+				{
+					// Try to figure out if both directories are identical (either same path or pointing to the same directory via a hard link)
+					bool skipMoveQuestion = true;
+					if ( HANDLE sourceDirectory = CreateFileW( userProfilePath.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); sourceDirectory != INVALID_HANDLE_VALUE )
 					{
-						PathAppendW( originalPath.data(), L"Documents" );
-						const size_t documentsDirPathLen = wcslen( originalPath.data() ); // We'll restore the null terminator later for deleting directories
-
-						bool skipMoveQuestion = true;
-						PathAppendW( originalPath.data(), L"MGR" );
-						if ( HANDLE sourceDirectory = CreateFileW( originalPath.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); sourceDirectory != INVALID_HANDLE_VALUE )
-						{
-							// Source exists so we have something to move
-							skipMoveQuestion = false;
-							if ( HANDLE destinationDirectory = CreateFileW( result.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); destinationDirectory != INVALID_HANDLE_VALUE )
-							{	
-								FILE_ID_INFO srcIdInfo, destIdInfo;
-								if ( GetFileInformationByHandleEx( sourceDirectory, FileIdInfo, &srcIdInfo, sizeof(srcIdInfo) ) != FALSE &&
-									GetFileInformationByHandleEx( destinationDirectory, FileIdInfo, &destIdInfo, sizeof(destIdInfo) ) != FALSE )
-								{
-									skipMoveQuestion = srcIdInfo.VolumeSerialNumber == destIdInfo.VolumeSerialNumber &&
-														memcmp( &srcIdInfo.FileId, &destIdInfo.FileId, sizeof(srcIdInfo.FileId) ) == 0;
-								}
-								else
-								{
-									// Windows 7 fallback
-									BY_HANDLE_FILE_INFORMATION srcInfo, destInfo;
-									if ( GetFileInformationByHandle( sourceDirectory, &srcInfo) != FALSE && GetFileInformationByHandle( destinationDirectory, &destInfo) != FALSE )
-									{
-										skipMoveQuestion = srcInfo.dwVolumeSerialNumber == destInfo.dwVolumeSerialNumber &&
-															srcInfo.nFileIndexLow == destInfo.nFileIndexLow && srcInfo.nFileIndexHigh == destInfo.nFileIndexHigh;
-									}
-								}
-								CloseHandle( destinationDirectory );
+						// Source exists so we have something to move
+						skipMoveQuestion = false;
+						if ( HANDLE destinationDirectory = CreateFileW( documentsPath.data(), 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr ); destinationDirectory != INVALID_HANDLE_VALUE )
+						{	
+							FILE_ID_INFO srcIdInfo, destIdInfo;
+							if ( GetFileInformationByHandleEx( sourceDirectory, FileIdInfo, &srcIdInfo, sizeof(srcIdInfo) ) != FALSE &&
+								GetFileInformationByHandleEx( destinationDirectory, FileIdInfo, &destIdInfo, sizeof(destIdInfo) ) != FALSE )
+							{
+								skipMoveQuestion = srcIdInfo.VolumeSerialNumber == destIdInfo.VolumeSerialNumber &&
+													memcmp( &srcIdInfo.FileId, &destIdInfo.FileId, sizeof(srcIdInfo.FileId) ) == 0;
 							}
-
-							CloseHandle( sourceDirectory );
+							else
+							{
+								// Windows 7 fallback
+								BY_HANDLE_FILE_INFORMATION srcInfo, destInfo;
+								if ( GetFileInformationByHandle( sourceDirectory, &srcInfo) != FALSE && GetFileInformationByHandle( destinationDirectory, &destInfo) != FALSE )
+								{
+									skipMoveQuestion = srcInfo.dwVolumeSerialNumber == destInfo.dwVolumeSerialNumber &&
+														srcInfo.nFileIndexLow == destInfo.nFileIndexLow && srcInfo.nFileIndexHigh == destInfo.nFileIndexHigh;
+								}
+							}
+							CloseHandle( destinationDirectory );
 						}
 
+						CloseHandle( sourceDirectory );
+					}
 
-						if ( !skipMoveQuestion )
+
+					if ( !skipMoveQuestion )
+					{
+						auto fnDialogFunc = [] ( HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR ) -> HRESULT
 						{
-							auto fnDialogFunc = [] ( HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR ) -> HRESULT
+							if ( msg == TDN_CREATED )
 							{
-								if ( msg == TDN_CREATED )
+								HMODULE gameModule = GetModuleHandle( nullptr );
+								if ( HICON mainIcon = LoadIcon( gameModule, TEXT("MAINICON") ); mainIcon != nullptr )
 								{
-									HMODULE gameModule = GetModuleHandle( nullptr );
-									if ( HICON mainIcon = LoadIcon( gameModule, TEXT("MAINICON") ); mainIcon != nullptr )
-									{
-										SendMessage( hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(mainIcon) );
-									}
-									if ( HICON smallIcon = LoadIcon( gameModule, TEXT("SMALLICON") ); smallIcon != nullptr )
-									{
-										SendMessage( hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon) );
-									}
+									SendMessage( hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(mainIcon) );
 								}
-
-								return S_OK;
-							};
-
-							std::wstring contentString;
-							contentString.append( L"SilentPatch found your save games in the following location:\n\n" );
-							contentString.append( originalPath.data() );
-							contentString.append( L"\n\nThis does not appear to be your real Documents directory. "
-													L"Do you wish to relocate them to this location instead?\n\n" );
-							contentString.append( result.data() );
-							contentString.append( L"\n\nThis way saves will be located in your real Documents directory and "
-													L"Steam Cloud will start to function properly.\n\n"
-													L"If you select \"Don't ask me again\" your choice will be remembered in SilentPatchMGR.ini file." );
-
-							// TODO: Prompt the user
-							TASKDIALOGCONFIG dialogConfig { sizeof(dialogConfig) };
-							dialogConfig.dwFlags = TDF_CAN_BE_MINIMIZED;
-							dialogConfig.dwCommonButtons = TDCBF_YES_BUTTON|TDCBF_NO_BUTTON;
-							dialogConfig.pszWindowTitle = L"SilentPatch";
-							dialogConfig.pszContent = contentString.c_str();
-							dialogConfig.nDefaultButton = IDYES;
-							dialogConfig.pszVerificationText = L"Don't ask me again";
-							dialogConfig.pszMainIcon = TD_INFORMATION_ICON;
-							dialogConfig.pfCallback = fnDialogFunc;
-
-							int buttonResult;
-							BOOL dontAskAgain;
-							if ( SUCCEEDED(TaskDialogIndirect( &dialogConfig, &buttonResult, nullptr, &dontAskAgain )) )
-							{
-								// TODO: Store result in INI if dontAskAgain is checked
-								if ( buttonResult == IDYES )
+								if ( HICON smallIcon = LoadIcon( gameModule, TEXT("SMALLICON") ); smallIcon != nullptr )
 								{
-									// Copying just to be sure it's double null terminated at the end
-									auto stringToDoubleNullTerminated = []( const auto& str )
-									{
-										std::vector<wchar_t> result( str.begin(), str.begin() + wcslen(str.data()) );
-										result.insert( result.end(), 2, '\0' );
-										return result;
-									};
+									SendMessage( hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon) );
+								}
+							}
 
-									const std::vector<wchar_t> source = stringToDoubleNullTerminated( originalPath );
-									const std::vector<wchar_t> destination = stringToDoubleNullTerminated( result );
+							return S_OK;
+						};
 
-									SHFILEOPSTRUCTW moveOp = {};
-									moveOp.wFunc = FO_MOVE;
-									moveOp.fFlags = FOF_NOCONFIRMMKDIR;
-									moveOp.pFrom = source.data();
-									moveOp.pTo = destination.data();
-									const int moveResult = SHFileOperationW( &moveOp );
-									if ( moveResult == 0 )
+						std::wstring contentString;
+						contentString.append( L"SilentPatch found your save games in the following location:\n\n" );
+						contentString.append( userProfilePath.data() );
+						contentString.append( L"\n\nThis does not appear to be your real Documents directory. "
+												L"Do you wish to relocate them to the following instead?\n\n" );
+						contentString.append( documentsPath.data() );
+						contentString.append( L"\n\nThis way saves will be located in your real Documents directory and "
+												L"Steam Cloud will start to function properly.\n\n"
+												L"If you select \"Don't ask me again\" your choice will be remembered in " );
+						contentString.append( PathFindFileNameW( iniPath.c_str() ) );
+
+						contentString.append( L" file." );
+
+						TASKDIALOGCONFIG dialogConfig { sizeof(dialogConfig) };
+						dialogConfig.dwFlags = TDF_CAN_BE_MINIMIZED;
+						dialogConfig.dwCommonButtons = TDCBF_YES_BUTTON|TDCBF_NO_BUTTON;
+						dialogConfig.pszWindowTitle = L"SilentPatch";
+						dialogConfig.pszContent = contentString.c_str();
+						dialogConfig.nDefaultButton = IDYES;
+						dialogConfig.pszVerificationText = L"Don't ask me again";
+						dialogConfig.pszMainIcon = TD_INFORMATION_ICON;
+						dialogConfig.pfCallback = fnDialogFunc;
+
+						int buttonResult;
+						BOOL dontAskAgain;
+						if ( SUCCEEDED(TaskDialogIndirect( &dialogConfig, &buttonResult, nullptr, &dontAskAgain )) )
+						{
+							if ( buttonResult == IDYES )
+							{
+								// Copying just to be sure it's double null terminated at the end
+								auto stringToDoubleNullTerminated = []( std::wstring str )
+								{
+									str.append( 2, L'\0' );
+									return str;
+								};
+
+								const std::wstring source = stringToDoubleNullTerminated( userProfilePath );
+								const std::wstring destination = stringToDoubleNullTerminated( documentsPath );
+
+								SHFILEOPSTRUCTW moveOp = {};
+								moveOp.wFunc = FO_MOVE;
+								moveOp.fFlags = FOF_NOCONFIRMMKDIR;
+								moveOp.pFrom = source.c_str();
+								moveOp.pTo = destination.c_str();
+								const int moveResult = SHFileOperationW( &moveOp );
+								if ( moveResult == 0 )
+								{
+									if ( moveOp.fAnyOperationsAborted == FALSE )
 									{
-										if ( moveOp.fAnyOperationsAborted != FALSE )
+										// Remember "Yes" only now, after everything succeeded
+										if ( dontAskAgain != FALSE )
 										{
-											MessageBoxW( nullptr, L"Move operation has been aborted by the user. The game will continue using an original save path.\n\n"
-																  L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
-																  L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
+											WriteSaveRelocOption( iniPath, true );
 										}
+
+										// All went fine, only NOW we can decide to use a real Documents path
+										useDocumentsPath = true;
+
+										// Also try to delete the original Documents directory - it's likely empty now
+										RemoveDirectoryW( std::wstring(userProfilePath.data(), userProfileDirPos).c_str() );
 									}
 									else
 									{
-										MessageBoxW( nullptr, L"Move operation failed. The game will continue using an original save path.\n\n"
-											L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
-										
-											L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
+										MessageBoxW( nullptr, L"Move operation has been aborted by the user. The game will continue using an original save path.\n\n"
+																L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
+																L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
 									}
 								}
 								else
 								{
-									// User pressed No, fall back to using an old path
-									// TODO: Do
+									MessageBoxW( nullptr, L"Move operation failed. The game will continue using an original save path.\n\n"
+										L"Please verify that all your saves are still present in the source folder - if not, move them back from the destination folder.",
+										
+										L"SilentPatch", MB_OK|MB_ICONERROR|MB_SETFOREGROUND );
 								}
 							}
 							else
 							{
-								// Something went wrong displaying the dialog, fall back to using an old path
-								// TODO: DO
+								// Remember "No" instantly
+								if ( dontAskAgain != FALSE )
+								{
+									WriteSaveRelocOption( iniPath, false );
+								}
 							}
 						}
-						originalPath[documentsDirPathLen] = '\0';
-						RemoveDirectoryW( originalPath.data() );
 					}
-
-					CoTaskMemFree( documentsPath );
 				}
-				PathAppendW( result.data(), L"SaveData" );
+
+				std::array<wchar_t, MAX_PATH> result;
+				PathCombineW( result.data(), useDocumentsPath ? documentsPath.data() : userProfilePath.data(), L"SaveData" );
 				return result;
 			} ();
 
@@ -403,6 +483,22 @@ static void InitASI()
 			Patch( saveDataDelete.get<void>( 0x18C + 2 ), &pCloseHandleChecked );
 		}
 	}
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)
+{
+	UNREFERENCED_PARAMETER(lpReserved);
+
+	switch ( reason )
+	{
+	case DLL_PROCESS_ATTACH:
+	{
+		hDLLModule = hModule;
+		break;
+	}
+	}
+
+	return TRUE;
 }
 
 

@@ -23,6 +23,31 @@
 
 HMODULE hDLLModule;
 
+std::wstring& TrimZeros( std::wstring& str )
+{
+	auto pos = str.find_last_not_of( L'\0' );
+	if ( pos == std::string::npos )
+	{
+		str.clear();
+	}
+	else
+	{
+		str.erase( pos + 1 );
+	}
+	return str;
+}
+
+const std::wstring& GetINIPath()
+{
+	static const std::wstring path = [] {
+		std::wstring result(MAX_PATH, '\0');
+		GetModuleFileNameW( hDLLModule, result.data(), result.size() - 3 ); // Minus max required space for extension
+		PathRenameExtensionW( result.data(), L".ini" );
+		return TrimZeros( result );
+	}();
+	return path;
+}
+
 namespace FSFix
 {
 	namespace internal
@@ -31,20 +56,6 @@ namespace FSFix
 		{
 			const DWORD attribs = GetFileAttributesW( lpPath );
 			return attribs != INVALID_FILE_ATTRIBUTES && (attribs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-		}
-
-		std::wstring& TrimZeros( std::wstring& str )
-		{
-			auto pos = str.find_last_not_of( L'\0' );
-			if ( pos == std::string::npos )
-			{
-				str.clear();
-			}
-			else
-			{
-				str.erase( pos + 1 );
-			}
-			return str;
 		}
 
 		std::wstring GetUserProfilePath( size_t& documentsPathLength )
@@ -79,14 +90,6 @@ namespace FSFix
 			return TrimZeros( result );
 		}
 
-		std::wstring GetINIPath()
-		{
-			std::wstring result(MAX_PATH, '\0');
-			GetModuleFileNameW( hDLLModule, result.data(), result.size() - 3 ); // Minus max required space for extension
-			PathRenameExtensionW( result.data(), L".ini" );
-			return TrimZeros( result );
-		}
-
 		constexpr const wchar_t* OPT_RELOCATE_SAVE_DIR = L"RelocateSaveDirectory";
 		std::optional<bool> ReadSaveRelocOption( const std::wstring& iniPath )
 		{
@@ -113,7 +116,7 @@ namespace FSFix
 				const auto userProfilePath = GetUserProfilePath( userProfileDirPos );
 				const auto documentsPath = GetFixedDocumentsPath();
 
-				const auto iniPath = GetINIPath();
+				const auto& iniPath = GetINIPath();
 
 				bool useDocumentsPath = false;
 				
@@ -483,6 +486,18 @@ static void InitASI()
 			Patch( saveDataDelete.get<void>( 0x18C + 2 ), &pCloseHandleChecked );
 		}
 	}
+
+
+	// Skip intro splashes
+	if ( int skipIntros = GetPrivateProfileIntW( L"SilentPatch", L"SkipIntroSplashes", -1, GetINIPath().c_str() ); skipIntros != -1 )
+	{
+		if ( skipIntros != 0 )
+		{
+			auto showLogoSequence = pattern( "8B 8D 8C 00 00 00 85 C9" ).get_one();
+			Patch<uint8_t>( showLogoSequence.get<void>( 8 ), 0xEB ); // je -> jmp
+		}
+	}
+
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved)

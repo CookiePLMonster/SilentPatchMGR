@@ -60,6 +60,7 @@
       <ConformanceMode>true</ConformanceMode>
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -79,6 +80,7 @@
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

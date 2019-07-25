@@ -14,6 +14,9 @@
 
 #include <Commctrl.h>
 
+#define DIRECTINPUT_VERSION 0x0800
+#include <dinput.h>
+
 #pragma comment(lib, "Shlwapi.lib")
 
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -372,6 +375,55 @@ namespace FSFix
 	}
 }
 
+namespace MouseButtonsFix
+{
+	DIMOUSESTATE2* diMouseState;
+
+	uint32_t SetMouseStateBits()
+	{
+		uint32_t mask = 0;
+
+		size_t index = 0;
+		for( auto button : diMouseState->rgbButtons )
+		{
+			if ( (button & 0x80) != 0 )
+			{
+				mask |= (1 << index);
+			}
+			index++;
+		}
+		return mask;
+	}
+
+	
+	// Frontend fixes
+	struct FrontEndEntryStruct
+	{
+		uint32_t m_tutorialImage;
+		uint32_t field1;
+		float field_8;
+		uint32_t hash2;
+		uint32_t m_keySettingsImage;
+		uint32_t field2;
+		uint32_t m_buttonMask;
+		uint32_t field3;
+		const char* m_coreKeyMessage;
+		const char* m_coreKeyMessage2;
+	};
+
+	static_assert( sizeof(FrontEndEntryStruct) == 0x28, "Wrong size: FrontEndEntryStruct" );
+
+	static const FrontEndEntryStruct FrontEndMouseButtons[] = {
+		{ 0x3D51DE11, 1, 6.0f, 0x62AB4A51, 0x61818406, 1, 1, 1, "CORE_KEY_MES_A01", "CORE_KEY_MES2_A01" },
+		{ 0x2FE471FF, 1, 6.0f, 0x701EE5BF, 0x73342BE8, 1, 2, 1, "CORE_KEY_MES_A02", "CORE_KEY_MES2_A02" },
+		{ 0x1758169A, 1, 6.0f, 0x48A282DA, 0x4B884C8D, 1, 4, 1, "CORE_KEY_MES_A03", "CORE_KEY_MES2_A03" },
+
+		// XMB1 and XMB2
+		{ 0x2086E6A8, 1, 6.0f, 0x7F7C72E8, 0x2086E6A8, 1, 8, 1, "", "" },
+		{ 0x2086E6A8, 1, 6.0f, 0x7F7C72E8, 0x2086E6A8, 1, 16, 1, "", "" },
+	};
+}
+
 static void InitASI()
 {
 	std::unique_ptr<ScopedUnprotect::Unprotect> Protect = ScopedUnprotect::UnprotectSectionOrFullModule( GetModuleHandle( nullptr ), ".text" );
@@ -496,6 +548,48 @@ static void InitASI()
 			auto showLogoSequence = pattern( "8B 8D 8C 00 00 00 85 C9" ).get_one();
 			Patch<uint8_t>( showLogoSequence.get<void>( 8 ), 0xEB ); // je -> jmp
 		}
+	}
+
+
+	// All mouse buttons bindable
+	{
+		using namespace MouseButtonsFix;
+
+		auto updateMouseState = pattern( "8B 44 24 04 53 56 D9 58 20 33 DB" ).get_one();
+
+		uintptr_t diMouseStatePtr = reinterpret_cast<uintptr_t>(*updateMouseState.get<void*>( 0x3E + 2 ));
+		diMouseState = reinterpret_cast<LPDIMOUSESTATE2>( diMouseStatePtr - offsetof(DIMOUSESTATE2, rgbButtons[1]) );
+
+		Patch<uint8_t>( updateMouseState.get<void>( 0x33 ), 0x50 );
+		InjectHook( updateMouseState.get<void>( 0x33 + 1 ), SetMouseStateBits, PATCH_CALL );
+		Patch( updateMouseState.get<void>( 0x33 + 6 ), { 0x8B, 0xF0, 0x58, 0xEB, 0x16 } );   
+
+
+		auto getFrontEndButtonAttribs = pattern( "0F BF C1 8D 04 80 8B 04 C5" ).count(8); // Almost all getters have nearly the same structure
+
+		// First replace all shared code
+		getFrontEndButtonAttribs.for_each_result([]( pattern_match match ) {
+			Patch( match.get<void>( 6 + 3 ), &FrontEndMouseButtons[0].m_buttonMask );
+
+			assert( *match.get<uint8_t>( 0x17 + 3 ) == 4 );
+			Patch<uint8_t>( match.get<uint8_t>( 0x17 + 3 ), _countof(FrontEndMouseButtons) );
+		} );
+
+		Patch( getFrontEndButtonAttribs.get(0).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].m_tutorialImage );
+		Patch( getFrontEndButtonAttribs.get(1).get<void>( 0x29 + 3 ), &FrontEndMouseButtons[0].field1 );
+		Patch( getFrontEndButtonAttribs.get(2).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].field_8 );
+		Patch( getFrontEndButtonAttribs.get(3).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].hash2 );
+		Patch( getFrontEndButtonAttribs.get(4).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].m_keySettingsImage );
+		Patch( getFrontEndButtonAttribs.get(5).get<void>( 0x29 + 3 ), &FrontEndMouseButtons[0].field2 );
+		Patch( getFrontEndButtonAttribs.get(6).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].m_coreKeyMessage );
+		Patch( getFrontEndButtonAttribs.get(7).get<void>( 0x26 + 3 ), &FrontEndMouseButtons[0].m_coreKeyMessage2 );
+
+		// That one special case...
+		auto getButtonMask = pattern( "85 F6 74 10 0F BF C8" ).get_one(); // sub_CAA2A0
+		Patch( getButtonMask.get<void>( 0xA + 3 ), &FrontEndMouseButtons[0].field3 );
+		Patch( getButtonMask.get<void>( 0x1A + 3 ), &FrontEndMouseButtons[0].m_buttonMask );
+		Patch( getButtonMask.get<void>( 0x3A + 3 ), &FrontEndMouseButtons[0].m_buttonMask );
+		Patch<uint8_t>( getButtonMask.get<uint8_t>( 0x2C + 3 ), _countof(FrontEndMouseButtons) );
 	}
 
 }

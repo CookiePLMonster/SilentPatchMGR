@@ -553,8 +553,8 @@ static void InitASI()
 	{
 		if ( skipIntros != 0 )
 		{
-			auto showLogoSequence = pattern( "85 C9 74 13 E8 BF 6E FF FF" ).get_one(); // should be unique
-			Patch<uint8_t>( showLogoSequence.get<void>( 2 ), 0xEB ); // je -> jmp
+			auto showLogoSequence = pattern( "8B 8D 8C 00 00 00 85 C9" ).get_one();
+			Patch<uint8_t>( showLogoSequence.get<void>( 8 ), 0xEB ); // je -> jmp
 		}
 	}
 

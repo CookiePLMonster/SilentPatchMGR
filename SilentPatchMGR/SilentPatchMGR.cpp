@@ -1,4 +1,4 @@
-#define WIN32_LEAN_AND_MEAN
+﻿#define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 
 #include <windows.h>
@@ -562,11 +562,11 @@ static void InitASI()
 	{
 		if ( fixWIGB != 0 )
 		{
-			auto disableOnBladeMode = pattern( "75 14 F7 05 94 A0 ?? ??" ).get_one();
-			auto enableInBladeMode = pattern( "75 0E 8B 16 8B 82 2C 03 00 00 FF D0" ).get_one();
+			auto disableOnBladeMode = get_pattern( "83 F8 02 75 14 F7 05", 3 );
+			auto enableInBladeMode = get_pattern( "83 F8 02 75 0E 8B 16", 3 );
 
-			Patch<uint8_t>( disableOnBladeMode.get<void>( 0 ), 0xEB );
-			Patch<uint8_t>( enableInBladeMode.get<void>( 0 ), 0xEB );
+			Patch<uint8_t>( disableOnBladeMode, 0xEB );
+			Patch<uint8_t>( enableInBladeMode, 0xEB );
 		}
 	}
 

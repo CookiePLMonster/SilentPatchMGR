@@ -558,6 +558,18 @@ static void InitASI()
 		}
 	}
 
+	if ( int fixWIGB = GetPrivateProfileIntW( L"SilentPatch", L"FixWigB", -1, GetINIPath().c_str() ); fixWIGB != -1 )
+	{
+		if ( fixWIGB != 0 )
+		{
+			auto disableOnBladeMode = get_pattern( "83 F8 02 75 14 F7 05", 3 );
+			auto enableInBladeMode = get_pattern( "83 F8 02 75 0E 8B 16", 3 );
+
+			Patch<uint8_t>( disableOnBladeMode, 0xEB );
+			Patch<uint8_t>( enableInBladeMode, 0xEB );
+		}
+	}
+
 
 	// All mouse buttons bindable
 	{
